@@ -69,6 +69,6 @@
     "page": "options.html",
     "open_in_tab": false
   },
-  "optional_host_permissions": ["<all_urls>"],
+  "host_permissions": ["<all_urls>"],
   "manifest_version": 3
 }

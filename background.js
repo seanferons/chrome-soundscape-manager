@@ -129,13 +129,10 @@ chrome.storage.onChanged.addListener((result) => {
   }
 });
 
-// On install display the options page so the user can give permissions.
-chrome.runtime.onInstalled.addListener(async (details) => {
+// Host access is granted by the manifest, so install does not open settings.
+chrome.runtime.onInstalled.addListener(async () => {
   await initializationCompletePromise;
   updateExtensionScripts();
-  if (details.reason === 'install') {
-    chrome.runtime.openOptionsPage();
-  }
 });
 
 chrome.action.onClicked.addListener(() => {
