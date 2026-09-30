@@ -1,5 +1,5 @@
 {
-  "name": "AutoPause",
+  "name": "Chrome Soundscape Manager",
   "version": "2.9.1",
   "description": "Pause other audio and video sources if audio is playing on active tab with automatic resume",
   "content_security_policy": {
@@ -54,7 +54,7 @@
       "description": "Add playing tabs to the soundscape"
     },
     "autopausewindow": {
-      "description": "Limit autopause usage to a window"
+      "description": "Limit Chrome Soundscape Manager to one window"
     }
   },
   "permissions": ["storage", "scripting", "idle"],

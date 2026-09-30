@@ -1,19 +1,9 @@
-# AutoPause
+# Chrome Soundscape Manager
 
-Browser extension to pause other audio and video sources if audio is playing on the active tab with automatic resume, fast forward and media controls.  
-[![Extension icon](icon.png)](https://addons.mozilla.org/firefox/addon/autopause/)
+Chrome extension for managing what plays together. It pauses other audio and video when the active tab is playing, resumes automatically, and can keep a set of tabs playing as a soundscape.
 
-Chrome listing: <https://chrome.google.com/webstore/detail/autopause/bcecldolamfbkgokgpnlpmhjcijglhll>  
-Firefox listing: <https://addons.mozilla.org/firefox/addon/autopause/>
+This is a modified version of [AutoPause](https://github.com/NDevTK/AutoPause) by NDevTK.
 
 ## Security
 
-If you believe you have found a security vulnerability, please report it responsibly. You can refer to the `security.txt` file for contact information or open an issue on the GitHub repository if you prefer (though for sensitive vulnerabilities, direct contact is encouraged).
-
-# How do I know the webstore version is the same code?
-
-https://github.com/NDevTK/ExtensionTransparency
-
-# Should the owner ever release a Chrome version without Firefox support
-
-NO THEY SHOULD NOT.
+If you believe you have found a security vulnerability, please report it responsibly. You can refer to the `security.txt` file for contact information.
