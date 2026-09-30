@@ -1,0 +1,74 @@
+{
+  "name": "AutoPause",
+  "version": "2.9.1",
+  "description": "Pause other audio and video sources if audio is playing on active tab with automatic resume",
+  "content_security_policy": {
+    "extension_pages": "default-src 'none'; script-src 'self'; frame-ancestors 'none'; form-action 'none'; upgrade-insecure-requests; block-all-mixed-content"
+  },
+  "cross_origin_embedder_policy": {
+    "value": "require-corp"
+  },
+  "cross_origin_opener_policy": {
+    "value": "same-origin"
+  },
+  "commands": {
+    "gotoaudible": {
+      "description": "Go to tab with audio"
+    },
+    "disableresume": {
+      "description": "Toggle auto resume"
+    },
+    "toggleFastPlayback": {
+      "description": "Toggle fast playback"
+    },
+    "Rewind": {
+      "description": "Rewind"
+    },
+    "pauseoninactive": {
+      "description": "Toggle pause on inactive"
+    },
+    "backgroundaudio": {
+      "description": "Set tab to play when nothing else is"
+    },
+    "togglePlayback": {
+      "suggested_key": {
+        "default": "Alt+P",
+        "mac": "Alt+P"
+      },
+      "description": "Toggle media playback"
+    },
+    "next": {
+      "description": "Go to end of media"
+    },
+    "previous": {
+      "description": "Go to start of media"
+    },
+    "ignoretab": {
+      "description": "Ignore a tab"
+    },
+    "previoustab": {
+      "suggested_key": {
+        "default": "Alt+A",
+        "mac": "Alt+A"
+      },
+      "description": "Add playing tabs to the soundscape"
+    },
+    "autopausewindow": {
+      "description": "Limit autopause usage to a window"
+    }
+  },
+  "permissions": ["storage", "scripting", "idle"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "icons": {"48": "icon48.png"},
+  "action": {
+    "default_title": "Open Settings"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": false
+  },
+  "optional_host_permissions": ["<all_urls>"],
+  "manifest_version": 3
+}
