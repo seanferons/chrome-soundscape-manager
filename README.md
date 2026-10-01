@@ -1,6 +1,6 @@
 # Chrome Soundscape Manager
 
-Chrome extension for managing what plays together. It pauses other audio and video when the active tab is playing, resumes automatically, and can keep a set of tabs playing as a soundscape.
+Chrome extension for managing what plays together. It pauses other audio and video when the active tab is playing, resumes automatically, and can keep one window playing as a soundscape.
 
 This is a modified version of [AutoPause](https://github.com/NDevTK/AutoPause) by NDevTK.
 
