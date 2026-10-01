@@ -250,7 +250,7 @@ chrome.tabs.onReplaced.addListener(async (newId, oldId) => {
   save();
 });
 
-function onPlay(tab, id = '', userActivation = false, keepOthers = false) {
+async function onPlay(tab, id = '', userActivation = false, keepOthers = false) {
   // Security: userActivation is from untrusted website content scripts however the isolated world should prevent attacks.
   if (state.autoPauseWindow !== null && state.autoPauseWindow !== tab.windowId)
     return;
@@ -265,8 +265,17 @@ function onPlay(tab, id = '', userActivation = false, keepOthers = false) {
     state.soundscapeWindow !== null && tab.windowId === state.soundscapeWindow;
   if (inSoundscape) state.soundscape.add(tab.id);
 
-  // Only the soundscape window is auto-paused, and only by media outside it.
-  if (tab.audible && !keepOthers && state.soundscapeWindow !== null && !inSoundscape) {
+  // Outside media pauses a playing soundscape, and only that media may resume it.
+  // A soundscape that is already paused stays paused when later media ends.
+  if (
+    tab.audible &&
+    !keepOthers &&
+    state.soundscapeWindow !== null &&
+    !inSoundscape &&
+    state.soundscapePausedBy === null &&
+    (await soundscapeIsPlaying()) &&
+    state.soundscapePausedBy === null
+  ) {
     state.soundscapePausedBy = tab.id;
     for (const memberId of state.soundscape) pause(memberId);
   }
@@ -479,9 +488,11 @@ chrome.commands.onCommand.addListener(async (command) => {
 
       if (anythingPlaying) {
         state.mediaPlaying = null;
+        state.soundscapePausedBy = null;
         for (const id of tabs) shortcutPausedTabs.add(id);
         for (const id of tabs) pause(id);
       } else if (state.soundscapeWindow !== null) {
+        state.soundscapePausedBy = null;
         shortcutPausedTabs.clear();
         for (const id of state.soundscape) play(id);
       } else if (
@@ -725,6 +736,29 @@ async function pauseOther(
 
 function playbackTabs() {
   return state.soundscapeWindow !== null ? state.soundscape : state.media;
+}
+
+// True when some soundscape tab is actually playing, so new outside media
+// would be what pauses it.
+async function soundscapeIsPlaying() {
+  if (state.soundscape.size === 0) return false;
+  let heldByShortcut = true;
+  for (const id of state.soundscape) {
+    if (!shortcutPausedTabs.has(id)) heldByShortcut = false;
+    if (await isAdvancing(id)) return true;
+  }
+  if (heldByShortcut) return false;
+  try {
+    const tabs = await chrome.tabs.query({
+      windowId: state.soundscapeWindow,
+      audible: true
+    });
+    return tabs.some(
+      (tab) => state.soundscape.has(tab.id) && !shortcutPausedTabs.has(tab.id)
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function pauseWindowMedia(windowId) {
