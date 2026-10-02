@@ -1,7 +1,7 @@
 {
   "name": "Chrome Soundscape Manager",
   "version": "1.0",
-  "description": "Pause other audio and video sources if audio is playing on active tab with automatic resume",
+  "description": "Keep one window playing as a soundscape, and pause it while other media plays",
   "content_security_policy": {
     "extension_pages": "default-src 'none'; script-src 'self'; frame-ancestors 'none'; form-action 'none'; upgrade-insecure-requests; block-all-mixed-content"
   },
@@ -12,39 +12,12 @@
     "value": "same-origin"
   },
   "commands": {
-    "gotoaudible": {
-      "description": "Go to tab with audio"
-    },
-    "disableresume": {
-      "description": "Toggle auto resume"
-    },
-    "toggleFastPlayback": {
-      "description": "Toggle fast playback"
-    },
-    "Rewind": {
-      "description": "Rewind"
-    },
-    "pauseoninactive": {
-      "description": "Toggle pause on inactive"
-    },
-    "backgroundaudio": {
-      "description": "Set tab to play when nothing else is"
-    },
     "togglePlayback": {
       "suggested_key": {
         "default": "Alt+P",
         "mac": "Alt+P"
       },
-      "description": "Toggle media playback"
-    },
-    "next": {
-      "description": "Go to end of media"
-    },
-    "previous": {
-      "description": "Go to start of media"
-    },
-    "ignoretab": {
-      "description": "Ignore a tab"
+      "description": "Pause or resume the soundscape"
     },
     "soundscapewindow": {
       "suggested_key": {
@@ -52,15 +25,29 @@
         "mac": "Alt+S"
       },
       "description": "Make this window the soundscape"
-    },
-    "autopausewindow": {
-      "description": "Limit Chrome Soundscape Manager to one window"
     }
   },
-  "permissions": ["storage", "scripting", "idle"],
+  "permissions": ["storage", "scripting"],
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["ContentScript.js"],
+      "all_frames": true,
+      "match_origin_as_fallback": true,
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["<all_urls>"],
+      "exclude_matches": ["https://*.netflix.com/*"],
+      "js": ["WindowScript.js"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
   "icons": {"48": "icon48.png"},
   "action": {
     "default_title": "Open Settings"

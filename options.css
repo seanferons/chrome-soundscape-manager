@@ -25,7 +25,3 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
-#userinput:invalid {
-  border-color: red;
-}

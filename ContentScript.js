@@ -14,9 +14,6 @@ if (window.documentPictureInPicture)
     if (event.isTrusted && event instanceof DocumentPictureInPictureEvent) {
       // For the top documentPictureInPicture window we are sharing the opener tab audible value
       addListener(event.window.document);
-      event.window.addEventListener('focus', (e) => {
-        if (e.isTrusted) send('tabFocus');
-      });
     }
   });
 
@@ -31,38 +28,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 function onExtensionMessage(message, sendResponse) {
   switch (message.type) {
-    case 'visablePopup':
-      if (!visablePopup()) break;
-      sendResponse('true');
-      break;
-    case 'toggleFastPlayback':
-      toggleRate();
-      break;
-    case 'Rewind':
-      Rewind();
-      break;
-    case 'allowplayback':
-      resume(false);
-      break;
-    case 'next':
-      next();
-      break;
-    case 'previous':
-      previous();
-      break;
     case 'pause':
       pause();
       break;
     case 'play':
       // When there media already playing tell the background script.
       if (isPlaying()) send('play');
-      resume(true);
+      resume();
       break;
     case 'audible':
       checkShadow();
-      break;
-    case 'hidden':
-      checkVisibility();
       break;
     case 'isplaying':
       if (!isPlaying()) break;
@@ -71,9 +46,6 @@ function onExtensionMessage(message, sendResponse) {
     case 'isadvancing':
       if (!isAdvancing()) break;
       sendResponse('true');
-      break;
-    case 'pauseOther':
-      pauseOther(message.body);
       break;
     case 'new':
       checkShadow();
@@ -105,70 +77,9 @@ function isPaused(e) {
   return e.paused || e.playbackRate === 0;
 }
 
-function next() {
-  Elements.forEach((data, e) => {
-    if (isPaused(e)) return;
-    e.currentTime = e.duration;
-  });
-}
-
-function previous() {
-  Elements.forEach((data, e) => {
-    if (isPaused(e)) return;
-    // Go to start of media
-    e.currentTime = 0;
-  });
-}
-
-// Controlled by global fast forward shortcut
-function toggleRate() {
-  Elements.forEach((data, e) => {
-    if (isPaused(e)) return;
-    if (e.playbackRate > 1) {
-      e.playbackRate = 1;
-    } else {
-      e.playbackRate = 2;
-    }
-  });
-}
-
-function pauseOther(id) {
-  Elements.forEach((data, e) => {
-    if (e.paused || isMuted(e)) return;
-    if (data.id !== id) e.pause();
-  });
-}
-
-// Controlled by global rewind shortcut
-function Rewind() {
-  Elements.forEach((data, e) => {
-    if (isPaused(e)) return;
-    e.currentTime -= 30;
-  });
-}
-
 function onPlay(e, volumeChange) {
-  let data = Elements.get(e);
-  if (isMuted(e)) {
-    send('playMuted');
-    return;
-  }
-  // If duration is unknown, wait for metadata before reporting to background.
-  // This lets the background correctly identify short media (e.g. notification sounds).
-  if (isNaN(e.duration)) {
-    let sent = false;
-    const sendOnce = () => {
-      if (sent) return;
-      sent = true;
-      if (!isPaused(e) && !isMuted(e)) {
-        send('play', data.id, e.duration, volumeChange);
-      }
-    };
-    e.addEventListener('durationchange', sendOnce, {once: true});
-    setTimeout(sendOnce, 500);
-    return;
-  }
-  send('play', data.id, e.duration, volumeChange);
+  if (!Elements.has(e) || isMuted(e)) return;
+  send('play', volumeChange);
 }
 
 function validMedia(e) {
@@ -219,14 +130,7 @@ function isMuted(e) {
 function addMedia(src) {
   if (Elements.has(src)) return;
 
-  let mediaID = '';
-  try {
-    mediaID = crypto.randomUUID();
-  } catch {
-    // On insecure website we cant have a ID :(
-  }
-
-  Elements.set(src, {id: mediaID});
+  Elements.set(src, {});
   let controller = new AbortController();
 
   src.addEventListener(
@@ -378,14 +282,12 @@ function pause() {
   } catch {}
 }
 
-async function resume(shouldPlay) {
+function resume() {
   Elements.forEach((data, e) => {
     if (!data.wasPlaying) return;
-    // Pause foreground media normaly
-    if (shouldPlay === false) e.pause();
     normalPlayback(e);
     // playbackRate 0 cannot stick on some media, so pauseElement calls pause().
-    if (shouldPlay !== false && e.paused) {
+    if (e.paused) {
       const pending = e.play();
       if (pending) pending.catch(() => {});
     }
@@ -436,14 +338,9 @@ function extensionAlive() {
   }
 }
 
-function send(message, body = '', duration, volumeChange) {
+function send(message, volumeChange) {
   if (!extensionAlive()) return;
-  const msg = {
-    type: message,
-    body: body,
-    userActivation: navigator.userActivation.isActive
-  };
-  if (duration !== undefined) msg.duration = duration;
+  const msg = {type: message};
   if (volumeChange) msg.volumeChange = true;
   // sendMessage returns a promise in MV3. After a reload that promise rejects
   // with "Extension context invalidated" if nothing catches it.
@@ -462,31 +359,6 @@ window.addEventListener(
     passive: true
   }
 );
-
-function visablePopup() {
-  if (window.documentPictureInPicture) {
-    if (documentPictureInPicture.window !== null) return true;
-  }
-  return (
-    document.visibilityState !== 'hidden' || document.pictureInPictureElement
-  );
-}
-
-function checkVisibility() {
-  if (!visablePopup()) {
-    checkShadow();
-    send('hidden');
-  }
-}
-
-window.addEventListener('visibilitychange', checkVisibility, {
-  capture: true,
-  passive: true
-});
-
-function hasProperty(value, key) {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
 
 function shadow(e) {
   try {

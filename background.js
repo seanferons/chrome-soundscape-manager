@@ -2,39 +2,12 @@
 /* global chrome */
 var state = {};
 
-const resumelimit = 5;
-const shortMediaDuration = 3; // seconds
-const shortMediaDebounce = 5000; // ms, for tabs without content script access
-const pendingAudible = new Map();
-const setItems = [
-  'media',
-  'soundscape',
-  'backgroundaudio',
-  'otherTabs',
-  'mutedTabs',
-  'ignoredTabs',
-  'mutedMedia',
-  'legacyMedia'
-];
+const setItems = ['soundscape'];
 
-var options = {};
-
-state.media = new Set(); // List of tabs with media.
 state.soundscape = new Set(); // Playing tabs in the soundscape window.
 state.soundscapeWindow = null; // Window whose media is the soundscape.
 state.soundscapePausedBy = null; // Outside tab that paused the soundscape.
-state.backgroundaudio = new Set();
-state.mediaPlaying = null; // Tab ID of active media.
-state.activeTab = null;
-state.lastPlaying = null;
-state.otherTabs = new Set(); // Tab IDs of media with no permission to access.
-state.mutedTabs = new Set(); // Tab IDs of all muted media.
-state.ignoredTabs = new Set();
-state.mutedMedia = new Set(); // Tab IDs of resumable muted media.
-state.legacyMedia = new Set(); // Tab IDs of old media.
-state.autoPauseWindow = null;
-state.locked = false;
-// Tabs paused by the playback shortcut. Focusing them must not resume playback.
+// Tabs paused by the playback shortcut. Later media must not resume them.
 var shortcutPausedTabs = new Set();
 // Tabs just paused because their window lost the soundscape. Ignore the
 // pause echo so it does not immediately silence the new soundscape window.
@@ -46,31 +19,28 @@ const initializationCompletePromise = new Promise((resolve) => {
 });
 
 async function save() {
-  let temp = Object.assign({}, state);
-  for (let value of setItems) {
+  const temp = Object.assign({}, state);
+  for (const value of setItems) {
     temp[value] = [...temp[value]];
   }
-  let result = await chrome.storage.session.set({state: temp});
+  await chrome.storage.session.set({state: temp});
 }
 
-var exclude = [];
-
-// https://github.com/NDevTK/AutoPause/issues/31
+// The main-world hook breaks Netflix playback.
 const unsupportedWindowScripts = ['https://*.netflix.com/*'];
-const unsupportedScripts = [];
 
 async function restore() {
-  let result = await chrome.storage.session.get('state');
+  const result = await chrome.storage.session.get('state');
   if (typeof result.state === 'object' && result.state !== null) {
-    // Support Set();
-    for (let value of setItems) {
+    for (const value of setItems) {
       result.state[value] = new Set(result.state[value] || []);
     }
-    state = result.state;
+    state.soundscape = result.state.soundscape;
+    state.soundscapeWindow = result.state.soundscapeWindow ?? null;
+    state.soundscapePausedBy = result.state.soundscapePausedBy ?? null;
   }
   if (typeof state.soundscapeWindow !== 'number' || state.soundscapeWindow < 0) {
-    // Drop a soundscape built the old per-tab way.
-    const hadMembers = state.soundscape instanceof Set && state.soundscape.size > 0;
+    const hadMembers = state.soundscape.size > 0;
     state.soundscapeWindow = null;
     state.soundscape = new Set();
     state.soundscapePausedBy = null;
@@ -85,28 +55,6 @@ async function restore() {
       await save();
     }
   }
-  let result2 = await chrome.storage.sync.get([
-    'options',
-    'exclude',
-    'appliedDefaults',
-    'appliedDefaultsVersion'
-  ]);
-  if (typeof result2.options === 'object' && result2.options !== null)
-    options = result2.options;
-  // Presence of a key means the checkbox is on. Each new default is applied
-  // once; unchecking it after that sticks.
-  let defaultsVersion = result2.appliedDefaultsVersion || 0;
-  if (!defaultsVersion && result2.appliedDefaults) defaultsVersion = 1;
-  if (defaultsVersion < 2) {
-    if (defaultsVersion < 1) options.multipletabs = true;
-    options.ignoretabchange = true;
-    await chrome.storage.sync.set({
-      options,
-      appliedDefaults: true,
-      appliedDefaultsVersion: 2
-    });
-  }
-  if (Array.isArray(result2.exclude)) exclude = result2.exclude;
   applyDefaultShortcuts();
   resolveInitialization();
 }
@@ -136,21 +84,6 @@ async function applyDefaultShortcuts() {
 
 restore();
 
-// Security: chrome.storage.sync is not safe from website content scripts.
-chrome.storage.onChanged.addListener((result) => {
-  if (typeof result.options === 'object' && result.options !== null)
-    options = result.options.newValue;
-  if (
-    typeof result.exclude === 'object' &&
-    result.exclude !== null &&
-    Array.isArray(result.exclude.newValue)
-  ) {
-    exclude = result.exclude.newValue;
-    updateContentScripts();
-  }
-});
-
-// Host access is granted by the manifest, so install does not open settings.
 chrome.runtime.onInstalled.addListener(async () => {
   await initializationCompletePromise;
   updateExtensionScripts();
@@ -160,107 +93,38 @@ chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
 
-function onMute(tabId) {
-  state.mutedTabs.add(tabId);
-  state.media.delete(tabId);
-  // Pause hidden muted tabs.
-  pause(tabId, true);
-  onPause(tabId);
-  save();
-}
-
 chrome.runtime.onMessage.addListener(async (message, sender) => {
   await initializationCompletePromise;
   // Security: Messages are from untrusted website content scripts.
-  if (
-    state.autoPauseWindow !== null &&
-    state.autoPauseWindow !== sender.tab.windowId
-  )
-    return;
-  state.otherTabs.delete(sender.tab.id);
-  if (!hasProperty(sender, 'tab') || state.ignoredTabs.has(sender.tab.id))
-    return;
+  if (!hasProperty(sender, 'tab')) return;
   switch (message.type) {
-    case 'hidden':
-      if (await visablePopup(sender.tab.id)) break;
-      if (state.mutedTabs.has(sender.tab.id)) {
-        if (
-          hasProperty(options, 'muteonpause') &&
-          state.mutedMedia.has(sender.tab.id)
-        ) {
-          state.media.add(sender.tab.id);
-        }
-        // Pause hidden muted tabs.
-        pause(sender.tab.id);
-      }
-      break;
     case 'play':
-      if (sender.tab.mutedInfo.muted) {
-        state.mutedMedia.add(sender.tab.id);
-        onMute(sender.tab.id);
-      } else {
-        // Ignore short media (e.g. notification sounds) when option is enabled.
-        if (
-          hasProperty(options, 'ignoreshort') &&
-          isFinite(message.duration) &&
-          message.duration > 0 &&
-          message.duration < shortMediaDuration
-        )
-          break;
-        state.mutedMedia.delete(sender.tab.id);
-        const alreadyTracked = state.media.has(sender.tab.id);
-        state.media.add(sender.tab.id);
-        onPlay(
-          sender.tab,
-          message.body,
-          message.userActivation,
-          message.volumeChange && alreadyTracked
-        );
-      }
-      break;
-    case 'playMuted':
-      if (await isPlaying(sender.tab.id)) break;
-      state.mutedMedia.delete(sender.tab.id);
-      onMute(sender.tab.id);
+      await onPlay(sender.tab, Boolean(message.volumeChange));
       break;
     case 'pause':
       if (await isPlaying(sender.tab.id)) break;
-      remove(sender.tab.id);
-      break;
-    case 'tabFocus':
-      // Security: Verify the action is actually a real tab activation (documentPictureInPicture)
-      tabChange(sender.tab);
+      onPause(sender.tab.id);
       break;
   }
-  save();
 });
 
 chrome.tabs.onReplaced.addListener(async (newId, oldId) => {
   await initializationCompletePromise;
-  if (state.ignoredTabs.has(oldId)) {
-    state.ignoredTabs.add(newId);
-    state.ignoredTabs.delete(oldId);
-  }
   if (state.soundscape.has(oldId)) {
     state.soundscape.delete(oldId);
     state.soundscape.add(newId);
   }
+  if (shortcutPausedTabs.has(oldId)) {
+    shortcutPausedTabs.delete(oldId);
+    shortcutPausedTabs.add(newId);
+  }
   if (state.soundscapePausedBy === oldId) state.soundscapePausedBy = newId;
-  remove(oldId);
   save();
 });
 
-async function onPlay(tab, id = '', userActivation = false, keepOthers = false) {
-  // Security: userActivation is from untrusted website content scripts however the isolated world should prevent attacks.
-  if (state.autoPauseWindow !== null && state.autoPauseWindow !== tab.windowId)
-    return;
+async function onPlay(tab, keepOthers = false) {
+  if (!tab || leavingSoundscape.has(tab.id)) return;
 
-  if (leavingSoundscape.has(tab.id)) return;
-
-  if (hasProperty(options, 'ignoreother') && state.otherTabs.has(tab.id))
-    return;
-
-  // Media in the soundscape window joins it, including playback that starts later.
   const inSoundscape =
     state.soundscapeWindow !== null && tab.windowId === state.soundscapeWindow;
   if (inSoundscape) state.soundscape.add(tab.id);
@@ -279,143 +143,25 @@ async function onPlay(tab, id = '', userActivation = false, keepOthers = false) 
     state.soundscapePausedBy = tab.id;
     for (const memberId of state.soundscape) pause(memberId);
   }
-
-  if (hasProperty(options, 'multipletabs') && tab.id !== state.activeTab) {
-    save();
-    return;
-  }
-  // Dont allow a diffrent tab to hijack active media.
-  // Soundscape members play together. Tabs outside the soundscape are not paused.
-  if (denyPlay(tab, userActivation)) {
-    save();
-    return;
-  }
-  state.mediaPlaying = tab.id;
-
-  if (hasProperty(options, 'muteonpause'))
-    chrome.tabs.update(tab.id, {muted: false});
-
-  if (hasProperty(options, 'permediapause') && id.length === 36)
-    send(tab.id, 'pauseOther', id);
-
-  if (tab.id == state.activeTab) state.lastPlaying = null;
-  if (state.media.has(tab.id)) {
-    state.legacyMedia.delete(tab.id);
-    state.mutedTabs.delete(tab.id);
-    // Make tab top priority.
-    state.media.delete(tab.id);
-    state.media.add(tab.id);
-    if (hasProperty(options, 'resumelimit') && state.media.size > resumelimit) {
-      state.legacyMedia.add(
-        [...state.media][state.media.size - 1 - resumelimit]
-      );
-    }
-  }
   save();
 }
 
 function onPause(id) {
-  // Ignore event from other tabs.
-  if (id === state.mediaPlaying) state.lastPlaying = id;
-  // Only the outside tab that silenced the soundscape resumes it.
   if (id === state.soundscapePausedBy) resumeSoundscape();
   save();
 }
 
-async function tabChange(tab) {
-  if (state.ignoredTabs.has(tab.id)) return;
-
-  if (state.autoPauseWindow !== null && state.autoPauseWindow !== tab.windowId)
-    return;
-
-  state.activeTab = tab.id;
-  save();
-
-  if (hasProperty(options, 'ignoretabchange')) return;
-
-  const inSoundscape =
-    state.soundscapeWindow !== null && tab.windowId === state.soundscapeWindow;
-
-  if (hasProperty(options, 'pauseoninactive') && state.soundscapeWindow !== null) {
-    for (const memberId of state.soundscape) {
-      if (memberId !== tab.id) pause(memberId);
-    }
-  }
-
-  if (!inSoundscape) return;
-
-  if (
-    (state.media.has(tab.id) || state.mutedTabs.has(tab.id)) &&
-    !shortcutPausedTabs.has(tab.id)
-  ) {
-    play(tab.id);
-  } else if (state.otherTabs.has(tab.id)) {
-    onPlay(tab);
-  }
-  save();
-}
-
-function getResumeTab(exclude) {
-  const tabs =
-    state.backgroundaudio.size > 0 ||
-    hasProperty(options, 'pauseoninactive') ||
-    hasProperty(options, 'noauto')
-      ? state.backgroundaudio
-      : state.media;
-
-  // Prefer the active tab
-  if (state.media.has(state.activeTab) && state.activeTab !== exclude) {
-    return state.activeTab;
-  }
-
-  const resumableMedia = Array.from(tabs).filter(
-    (id) => id !== exclude && !state.legacyMedia.has(id)
-  );
-
-  if (resumableMedia.length > 0) {
-    return resumableMedia.pop();
-  }
-  return false;
-}
-
-// User may have mutiple windows open.
-chrome.windows.onFocusChanged.addListener(async (id) => {
-  await initializationCompletePromise;
-  if (id === chrome.windows.WINDOW_ID_NONE) return;
-  if (state.autoPauseWindow !== null && state.autoPauseWindow !== id) return;
-  setTimeout(() => {
-    chrome.tabs.query(
-      {
-        active: true,
-        currentWindow: true
-      },
-      (tabs) => {
-        if (tabs.length === 1) {
-          tabChange(tabs[0]);
-          save();
-        }
-      }
-    );
-  }, 200);
-});
-
-// Dont track unrelated windows
 chrome.tabs.onDetached.addListener(async (id, info) => {
   await initializationCompletePromise;
-  let changed = false;
   if (
-    state.soundscapeWindow !== null &&
-    info &&
-    info.oldWindowId === state.soundscapeWindow
-  ) {
-    state.soundscape.delete(id);
-    changed = true;
-  }
-  if (state.autoPauseWindow !== null) {
-    remove(id);
-    changed = true;
-  }
-  if (changed) save();
+    state.soundscapeWindow === null ||
+    !info ||
+    info.oldWindowId !== state.soundscapeWindow
+  )
+    return;
+  state.soundscape.delete(id);
+  shortcutPausedTabs.delete(id);
+  save();
 });
 
 chrome.tabs.onAttached.addListener(async (tabId, info) => {
@@ -437,309 +183,72 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   save();
 });
 
-// Handle keyboard shortcuts.
 chrome.commands.onCommand.addListener(async (command) => {
   await initializationCompletePromise;
-  // Security: Websites might trick the user into running commands.
   switch (command) {
-    case 'gotoaudible':
-      // Go to audible tab thats not active.
-      chrome.tabs.query(
-        {
-          audible: true,
-          active: false,
-          currentWindow: true
-        },
-        (tabs) => {
-          if (tabs.length > 0) {
-            chrome.tabs.update(tabs[0].id, {
-              active: true
-            });
-          } else if (state.media.size > 0) {
-            const result = getResumeTab();
-            if (result !== false) {
-              chrome.tabs.update(result, {
-                active: true
-              });
-            }
-          }
-        }
-      );
-      break;
-    case 'disableresume':
-      toggleOption('disableresume');
-      break;
-    case 'toggleFastPlayback':
-      Broadcast('toggleFastPlayback');
-      break;
-    case 'Rewind':
-      Broadcast('Rewind');
-      break;
-    case 'togglePlayback': {
-      const tabs = playbackTabs();
-      let anythingPlaying = false;
-
-      for (const id of tabs) {
-        if (await isAdvancing(id)) {
-          anythingPlaying = true;
-          break;
-        }
-      }
-
-      if (anythingPlaying) {
-        state.mediaPlaying = null;
-        state.soundscapePausedBy = null;
-        for (const id of tabs) shortcutPausedTabs.add(id);
-        for (const id of tabs) pause(id);
-      } else if (state.soundscapeWindow !== null) {
-        state.soundscapePausedBy = null;
-        shortcutPausedTabs.clear();
-        for (const id of state.soundscape) play(id);
-      } else if (
-        hasProperty(options, 'multipletabs') &&
-        state.backgroundaudio.size === 0
-      ) {
-        shortcutPausedTabs.clear();
-        // Broadcast does not unmute; pause() mutes when muteonpause is set.
-        if (hasProperty(options, 'muteonpause')) {
-          state.media.forEach((id) => {
-            chrome.tabs.update(id, {muted: false});
-          });
-        }
-        Broadcast('play');
-      } else {
-        const result = getResumeTab();
-
-        if (result !== false) {
-          shortcutPausedTabs.delete(result);
-          state.mediaPlaying = result;
-          play(result);
-        }
-      }
-
-      break;
-    }
-    case 'next':
-      Broadcast('next');
-      break;
-    case 'previous':
-      Broadcast('previous');
-      break;
-    case 'pauseoninactive':
-      toggleOption('pauseoninactive');
-      break;
-    case 'backgroundaudio':
-      // Currently only has one tab
-      state.backgroundaudio.clear();
-      state.backgroundaudio.add(state.activeTab);
-      break;
-    case 'ignoretab':
-      state.ignoredTabs.add(state.activeTab);
-      state.soundscape.delete(state.activeTab);
-      remove(state.activeTab);
+    case 'togglePlayback':
+      await toggleSoundscape();
       break;
     case 'soundscapewindow':
       await designateSoundscapeWindow();
       break;
-    case 'autopausewindow':
-      chrome.windows.getCurrent((w) => {
-        if (w.id === chrome.windows.WINDOW_ID_NONE) return;
-        state.autoPauseWindow = w.id;
-        save();
-      });
-      break;
   }
   save();
 });
 
-function pause(id, checkHidden) {
-  // Security: Leaks to websites that a different tab is audible or shotcut usage, Boring DoS.
-  if (hasProperty(options, 'nopermission')) {
-    chrome.tabs.discard(id);
-    return;
+async function toggleSoundscape() {
+  if (state.soundscapeWindow === null) return;
+  let anythingPlaying = false;
+  for (const id of state.soundscape) {
+    if (await isAdvancing(id)) {
+      anythingPlaying = true;
+      break;
+    }
   }
-  if (state.otherTabs.has(id)) return;
-  if (checkHidden) {
-    send(id, 'hidden');
+  // A manual pause or resume replaces any outside media that was holding it.
+  state.soundscapePausedBy = null;
+  if (anythingPlaying) {
+    for (const id of state.soundscape) shortcutPausedTabs.add(id);
+    for (const id of state.soundscape) pause(id);
   } else {
-    if (hasProperty(options, 'muteonpause'))
-      chrome.tabs.update(id, {muted: true});
-    send(id, 'pause');
+    shortcutPausedTabs.clear();
+    for (const id of state.soundscape) play(id);
   }
 }
-
-function play(id, force) {
-  // Security: If muteonpause is enabled need to ensure a tab is not unmuted when not wanted.
-  if (hasProperty(options, 'muteonpause'))
-    chrome.tabs.update(id, {muted: false});
-  if (hasProperty(options, 'disableresume') && !force) {
-    send(id, 'allowplayback');
-  } else {
-    send(id, 'play');
-  }
-}
-
-// On tab change
-chrome.tabs.onActivated.addListener(async (info) => {
-  await initializationCompletePromise;
-  chrome.tabs.get(info.tabId, async (tab) => {
-    tabChange(tab);
-    save();
-  });
-});
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await initializationCompletePromise;
-  setTimeout(() => {
-    state.ignoredTabs.delete(tabId);
-    state.soundscape.delete(tabId);
-    remove(tabId);
-    save();
-  }, 200);
+  shortcutPausedTabs.delete(tabId);
+  state.soundscape.delete(tabId);
+  onPause(tabId);
 });
 
-function remove(tabId) {
-  shortcutPausedTabs.delete(tabId);
-  state.media.delete(tabId);
-  state.mutedMedia.delete(tabId);
-  state.otherTabs.delete(tabId);
-  state.backgroundaudio.delete(tabId);
-  state.mutedTabs.delete(tabId);
-  state.legacyMedia.delete(tabId);
-  if (pendingAudible.has(tabId)) {
-    clearTimeout(pendingAudible.get(tabId));
-    pendingAudible.delete(tabId);
-  }
-  onPause(tabId);
-}
-
-// Detect changes to audible status of tabs
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   await initializationCompletePromise;
-  if (state.autoPauseWindow !== null && state.autoPauseWindow !== tab.windowId)
-    return;
-  if (state.ignoredTabs.has(tabId)) return;
   if (changeInfo.discarded) {
-    return remove(tabId);
+    shortcutPausedTabs.delete(tabId);
+    state.soundscape.delete(tabId);
+    onPause(tabId);
+    return;
   }
-  if (hasProperty(changeInfo, 'mutedInfo')) {
-    if (changeInfo.mutedInfo.muted && state.media.has(tabId)) {
-      state.mutedMedia.add(tabId);
-      onMute(tabId);
-    }
-    // If tab gets unmuted resume it.
-    else if (!changeInfo.mutedInfo.muted && state.mutedMedia.has(tabId)) {
-      state.mediaPlaying = tabId;
-      play(tabId, true);
-    } else if (changeInfo.mutedInfo.muted && state.otherTabs.has(tabId)) {
-      state.otherTabs.delete(tabId);
-      onPause(tabId);
-    }
-  }
-  save();
-  if (!hasProperty(changeInfo, 'audible')) return; // Bool that contains if audio is playing on tab.
-
+  if (!hasProperty(changeInfo, 'audible')) return;
   if (changeInfo.audible) {
-    // If has not got a play message from the content script assume theres no permission.
-    if (!state.media.has(tabId)) {
-      // Allow the media to check its shadow dom.
-      send(tabId, 'audible');
-      state.otherTabs.add(tabId);
-      if (hasProperty(options, 'ask'))
-        chrome.permissions.addHostAccessRequest({tabId: tabId});
-    }
-    // Debounce otherTabs when ignoreshort is enabled to filter notification sounds.
-    if (hasProperty(options, 'ignoreshort') && state.otherTabs.has(tabId)) {
-      if (pendingAudible.has(tabId)) clearTimeout(pendingAudible.get(tabId));
-      pendingAudible.set(
-        tabId,
-        setTimeout(() => {
-          pendingAudible.delete(tabId);
-          if (state.otherTabs.has(tabId)) onPlay(tab);
-        }, shortMediaDebounce)
-      );
-    } else {
-      onPlay(tab);
-    }
+    send(tabId, 'audible');
+    await onPlay(tab);
   } else {
-    // Cancel pending debounce if tab stopped being audible.
-    if (pendingAudible.has(tabId)) {
-      clearTimeout(pendingAudible.get(tabId));
-      pendingAudible.delete(tabId);
-    }
-    state.otherTabs.delete(tabId);
     onPause(tabId);
   }
-  save();
 });
 
-function denyPlay(tab, userActivation = false) {
-  // Security: Logic used to determine if videos are not allowed to play.
-  if (state.locked) return true;
-  if (userActivation) return false;
-  if (tab.id === state.activeTab) return false;
-  if (tab.id === state.lastPlaying) return false;
-  if (tab.id === state.mediaPlaying) return false;
-  if (hasProperty(options, 'allowactive') && tab.active) return false;
-  return true;
+function pause(id) {
+  send(id, 'pause');
 }
 
-async function denyPause(id, exclude, skipLast, allowbg, auto) {
-  // Security: Logic used to determine if the extension is not allowed to pause automatically.
-  if (state.locked) return false;
-  if (id === exclude) return true;
-  if (allowbg && state.backgroundaudio.has(id)) return true;
-  if (skipLast && id === state.lastPlaying) return true;
-  if (hasProperty(options, 'allowactive') && auto) {
-    const tab = await chrome.tabs.get(id);
-    if (tab.active) return true;
-  }
-  return false;
+function play(id) {
+  shortcutPausedTabs.delete(id);
+  send(id, 'play');
 }
 
-async function pauseAll() {
-  // Pause all media on a users request
-  await pauseOther(false, false, false, false);
-}
-
-async function pauseOther(
-  exclude = false,
-  skipLast = true,
-  allowbg = false,
-  auto = true
-) {
-  state.media.forEach(async (id) => {
-    // One soundscape member must not pause the others.
-    if (state.soundscape.has(exclude) && state.soundscape.has(id)) return;
-    // Only for tabs that have had media.
-    if (await denyPause(id, exclude, skipLast, allowbg, auto)) return;
-    return pause(id);
-  });
-  // New media pauses the whole soundscape, including tabs no longer in state.media.
-  if (exclude !== false && !state.soundscape.has(exclude)) {
-    state.soundscape.forEach((id) => {
-      if (id === exclude) return;
-      pause(id);
-    });
-  }
-  // Expand scope of pause to otherTabs if discarding is enabled.
-  if (
-    hasProperty(options, 'nopermission') &&
-    !hasProperty(options, 'ignoreother')
-  ) {
-    state.otherTabs.forEach(async (id) => {
-      if (await denyPause(id, exclude, skipLast, allowbg, auto)) return;
-      pause(id);
-    });
-  }
-}
-
-function playbackTabs() {
-  return state.soundscapeWindow !== null ? state.soundscape : state.media;
-}
-
-// True when some soundscape tab is actually playing, so new outside media
-// would be what pauses it.
 async function soundscapeIsPlaying() {
   if (state.soundscape.size === 0) return false;
   let heldByShortcut = true;
@@ -771,15 +280,13 @@ async function pauseWindowMedia(windowId) {
   const members = [...state.soundscape];
   const ids = new Set();
   for (const tab of tabs) {
-    if (tab.audible || state.media.has(tab.id) || members.includes(tab.id))
-      ids.add(tab.id);
+    if (tab.audible || members.includes(tab.id)) ids.add(tab.id);
   }
   if (tabs.length === 0) {
     for (const id of members) ids.add(id);
   }
   for (const id of ids) {
     leavingSoundscape.add(id);
-    state.otherTabs.delete(id);
     pause(id);
     setTimeout(() => leavingSoundscape.delete(id), 1500);
   }
@@ -796,11 +303,10 @@ async function designateSoundscapeWindow() {
 
   if (state.soundscapeWindow !== win.id) {
     const previous = state.soundscapeWindow;
-    // Clearing this first keeps the pause from auto-resuming the old window.
-    state.mediaPlaying = null;
     state.soundscapePausedBy = null;
     if (typeof previous === 'number') await pauseWindowMedia(previous);
     state.soundscape = new Set();
+    shortcutPausedTabs.clear();
     state.soundscapeWindow = win.id;
   }
 
@@ -810,10 +316,7 @@ async function designateSoundscapeWindow() {
   } catch {
     tabs = [];
   }
-  for (const tab of tabs) {
-    if (state.ignoredTabs.has(tab.id)) continue;
-    state.soundscape.add(tab.id);
-  }
+  for (const tab of tabs) state.soundscape.add(tab.id);
   save();
 }
 
@@ -822,30 +325,15 @@ function resumeSoundscape() {
   for (const id of state.soundscape) play(id);
 }
 
-async function Broadcast(message) {
-  state.media.forEach((id) => {
-    send(id, message);
-  });
-}
-
-async function send(id, message, body = '') {
+async function send(id, message) {
   try {
-    return await chrome.tabs.sendMessage(id, {type: message, body: body});
+    return await chrome.tabs.sendMessage(id, {type: message});
   } catch {}
 }
 
-async function tabTest(id, test) {
-  if (state.otherTabs.has(id)) return true;
-  const response = await send(id, test);
-  return response === 'true';
-}
-
-async function visablePopup(id) {
-  return await tabTest(id, 'visablePopup');
-}
-
 async function isPlaying(id) {
-  return await tabTest(id, 'isplaying');
+  const response = await send(id, 'isplaying');
+  return response === 'true';
 }
 
 async function isAdvancing(id) {
@@ -857,147 +345,35 @@ function hasProperty(value, key) {
   return Object.prototype.hasOwnProperty.call(value, key);
 }
 
-// Saves options to storage
-function toggleOption(o) {
-  if (hasProperty(options, o)) {
-    delete options[o];
-  } else {
-    options[o] = true;
-  }
-  return new Promise((resolve) => {
-    chrome.storage.sync.set(
-      {
-        options
-      },
-      function (result) {
-        resolve(result);
-      }
-    );
-  });
-}
-
-function matchPatternToRegExp(pattern) {
-  if (pattern === '<all_urls>') {
-    return /^(https?|file|ftp):\/\/.*/;
-  }
-  const match = /^(.*):\/\/([^/]+)(\/.*)$/.exec(pattern);
-  if (!match) {
-    console.error('Invalid pattern:', pattern);
-    return /^(?!)/; // Matches nothing
-  }
-  const [, scheme, host, path] = match;
-  const specialChars = /[\\[\]\(\)\{\}\^\$\+\.\?]/g;
-  let re = '^';
-  if (scheme === '*') {
-    re += '(https?|ftp)';
-  } else {
-    re += scheme.replace(specialChars, '\\$&');
-  }
-  re += ':\\/\\/';
-  if (host === '*') {
-    re += '[^/]+';
-  } else if (host.startsWith('*.')) {
-    re += '([^/]+\\.)?';
-    re += host.substring(2).replace(specialChars, '\\$&');
-  } else {
-    re += host.replace(specialChars, '\\$&');
-  }
-  re += path.replace(specialChars, '\\$&').replace(/\*/g, '.*');
-  re += '$';
-  return new RegExp(re);
-}
-
-function isUrlExcluded(url, extra = []) {
-  return exclude.concat(extra).some((pattern) => {
+function isNetflix(url) {
+  return unsupportedWindowScripts.some((pattern) => {
+    const host = pattern.replace('https://*.', '').replace('/*', '');
     try {
-      return matchPatternToRegExp(pattern).test(url);
-    } catch (e) {
-      console.error('Error matching pattern:', pattern, e);
+      return new URL(url).hostname === host || new URL(url).hostname.endsWith('.' + host);
+    } catch {
       return false;
     }
   });
 }
 
-async function updateContentScripts() {
-  await initializationCompletePromise;
-  chrome.permissions.getAll(async (p) => {
-    await chrome.scripting.unregisterContentScripts();
-    if (p.origins.length < 1) return;
-    await chrome.scripting.registerContentScripts([
-      {
-        id: 'ContentScript',
-        js: ['ContentScript.js'],
-        matches: p.origins,
-        excludeMatches: exclude.concat(unsupportedScripts),
-        allFrames: true,
-        matchOriginAsFallback: true,
-        runAt: 'document_start'
-      },
-      {
-        id: 'WindowScript',
-        js: ['WindowScript.js'],
-        matches: p.origins,
-        excludeMatches: exclude
-          .concat(unsupportedScripts)
-          .concat(unsupportedWindowScripts),
-        allFrames: true,
-        runAt: 'document_start',
-        world: 'MAIN'
-      }
-    ]);
-  });
-}
-
 async function updateExtensionScripts() {
-  await initializationCompletePromise;
-  await updateContentScripts();
   const tabs = await chrome.tabs.query({});
-  tabs.forEach(async (tab) => {
-    if (!tab.url || !tab.id) return;
+  for (const tab of tabs) {
+    if (!tab.url || !tab.id) continue;
     chrome.tabs.sendMessage(tab.id, {type: 'hi ya!'}).catch(async () => {
-      if (isUrlExcluded(tab.url, unsupportedScripts)) return;
       await chrome.scripting.executeScript({
-        target: {
-          tabId: tab.id,
-          allFrames: true
-        },
+        target: {tabId: tab.id, allFrames: true},
         files: ['ContentScript.js'],
         injectImmediately: true
       });
-      if (isUrlExcluded(tab.url, unsupportedWindowScripts)) return;
+      if (isNetflix(tab.url)) return;
       await chrome.scripting.executeScript({
-        target: {
-          tabId: tab.id,
-          allFrames: true
-        },
+        target: {tabId: tab.id, allFrames: true},
         files: ['WindowScript.js'],
         world: 'MAIN',
         injectImmediately: true
       });
       send(tab.id, 'new');
     });
-  });
-}
-
-async function checkIdle(userState) {
-  await initializationCompletePromise;
-  if (!hasProperty(options, 'checkidle')) return;
-  if (userState === 'locked') {
-    // Security: While locked no media should be playing and state.locked should stay true.
-    state.locked = true;
-    // Pause everything
-    pauseAll();
-  } else if (state.locked) {
-    state.locked = false;
-    const tabId = getResumeTab();
-    if (tabId !== false) play(tabId);
   }
-  save();
 }
-
-if (chrome.idle) {
-  chrome.idle.onStateChanged.addListener(checkIdle);
-}
-
-chrome.permissions.onAdded.addListener(updateExtensionScripts);
-chrome.permissions.onRemoved.addListener(updateContentScripts);
