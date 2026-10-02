@@ -193,6 +193,158 @@ chrome.tabs.onAttached.addListener(async (tabId, info) => {
   save();
 });
 
+// Last normal window that was focused besides the soundscape, so an external
+// link can be sent there instead of into the soundscape.
+let lastOtherWindowId = null;
+
+chrome.windows.onFocusChanged.addListener(async (windowId) => {
+  await initializationCompletePromise;
+  if (windowId === chrome.windows.WINDOW_ID_NONE) return;
+  if (windowId === state.soundscapeWindow) return;
+  try {
+    const win = await chrome.windows.get(windowId);
+    if (win.type === 'normal') lastOtherWindowId = windowId;
+  } catch {}
+});
+
+function isWebUrl(url) {
+  return typeof url === 'string' && /^https?:\/\//i.test(url);
+}
+
+function isNewTabPage(url) {
+  return (
+    typeof url === 'string' &&
+    (url.startsWith('chrome://newtab') || url.startsWith('chrome://new-tab-page'))
+  );
+}
+
+function tabWebUrl(tab) {
+  if (!tab) return '';
+  if (isWebUrl(tab.pendingUrl)) return tab.pendingUrl;
+  if (isWebUrl(tab.url)) return tab.url;
+  return '';
+}
+
+async function otherWindowId() {
+  let windows = [];
+  try {
+    windows = await chrome.windows.getAll({windowTypes: ['normal']});
+  } catch {
+    return null;
+  }
+  const others = windows.filter((win) => win.id !== state.soundscapeWindow);
+  if (others.length === 0) return null;
+  if (others.some((win) => win.id === lastOtherWindowId)) return lastOtherWindowId;
+  return others[0].id;
+}
+
+// Tabs opened from another app. Record them before any await, because the
+// address often arrives before initialization finishes.
+const externalWatch = new Set();
+const movingOut = new Set();
+const burstTabIds = new Set();
+let externalBurstTimer = null;
+
+function noteExternalTab(tabId) {
+  burstTabIds.add(tabId);
+  clearTimeout(externalBurstTimer);
+  externalBurstTimer = setTimeout(() => burstTabIds.clear(), 700);
+}
+
+function externalBurst() {
+  return burstTabIds.size > 1;
+}
+
+async function placeOutsideSoundscape(tabId) {
+  await initializationCompletePromise;
+  if (movingOut.has(tabId)) return;
+  if (externalBurst() || state.soundscapeWindow === null) return;
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    externalWatch.delete(tabId);
+    return;
+  }
+  if (tab.windowId !== state.soundscapeWindow) {
+    externalWatch.delete(tabId);
+    return;
+  }
+  movingOut.add(tabId);
+  externalWatch.delete(tabId);
+  try {
+    const windowId = await otherWindowId();
+    if (windowId === null) {
+      await chrome.windows.create({tabId, focused: true});
+    } else {
+      await chrome.tabs.move(tabId, {windowId, index: -1});
+      await chrome.tabs.update(tabId, {active: true});
+      await chrome.windows.update(windowId, {focused: true});
+    }
+  } catch {}
+  movingOut.delete(tabId);
+}
+
+function schedulePlace(tabId) {
+  noteExternalTab(tabId);
+  setTimeout(() => {
+    placeOutsideSoundscape(tabId);
+  }, 250);
+}
+
+// A link from another app has no opener tab. Chrome drops it in the focused
+// window; send it to another window, or a new one when that is the only window.
+chrome.tabs.onCreated.addListener((created) => {
+  if (!created || created.id == null || created.openerTabId) return;
+  if (isNewTabPage(created.pendingUrl) || isNewTabPage(created.url)) return;
+  externalWatch.add(created.id);
+  void settleExternalTab(created.id);
+});
+
+async function settleExternalTab(tabId) {
+  await initializationCompletePromise;
+  if (state.soundscapeWindow === null) {
+    externalWatch.delete(tabId);
+    return;
+  }
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch {
+    externalWatch.delete(tabId);
+    return;
+  }
+  if (tab.windowId !== state.soundscapeWindow || tab.openerTabId) {
+    externalWatch.delete(tabId);
+    return;
+  }
+  if (isNewTabPage(tab.pendingUrl) || isNewTabPage(tab.url)) {
+    externalWatch.delete(tabId);
+    return;
+  }
+  if (tabWebUrl(tab)) schedulePlace(tab.id);
+  else setTimeout(() => externalWatch.delete(tab.id), 3000);
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (!externalWatch.has(tabId)) return;
+  const url = changeInfo.pendingUrl || changeInfo.url || (tab && (tab.pendingUrl || tab.url));
+  if (isNewTabPage(url)) {
+    externalWatch.delete(tabId);
+    return;
+  }
+  if (!isWebUrl(url)) return;
+  schedulePlace(tabId);
+});
+
+// macOS opens a URL from another app as a start_page navigation.
+chrome.webNavigation.onCommitted.addListener((details) => {
+  if (!details || details.frameId !== 0) return;
+  if (details.transitionType !== 'start_page') return;
+  if (!isWebUrl(details.url)) return;
+  schedulePlace(details.tabId);
+});
+
 chrome.windows.onRemoved.addListener(async (windowId) => {
   await initializationCompletePromise;
   if (state.soundscapeWindow !== windowId) return;
@@ -413,27 +565,30 @@ function isNetflix(url) {
 async function updateExtensionScripts() {
   const tabs = await chrome.tabs.query({});
   for (const tab of tabs) {
-    if (!tab.url || !tab.id) continue;
+    // chrome:// pages, including this extensions page, reject injection.
+    if (!tab.id || !isWebUrl(tab.url)) continue;
     chrome.tabs.sendMessage(tab.id, {type: 'hi ya!'}).catch(async () => {
-      await chrome.scripting.executeScript({
-        target: {tabId: tab.id, allFrames: true},
-        files: ['MediaKeyScript.js'],
-        world: 'MAIN',
-        injectImmediately: true
-      });
-      await chrome.scripting.executeScript({
-        target: {tabId: tab.id, allFrames: true},
-        files: ['ContentScript.js'],
-        injectImmediately: true
-      });
-      if (isNetflix(tab.url)) return;
-      await chrome.scripting.executeScript({
-        target: {tabId: tab.id, allFrames: true},
-        files: ['WindowScript.js'],
-        world: 'MAIN',
-        injectImmediately: true
-      });
-      send(tab.id, 'new');
+      try {
+        await chrome.scripting.executeScript({
+          target: {tabId: tab.id, allFrames: true},
+          files: ['MediaKeyScript.js'],
+          world: 'MAIN',
+          injectImmediately: true
+        });
+        await chrome.scripting.executeScript({
+          target: {tabId: tab.id, allFrames: true},
+          files: ['ContentScript.js'],
+          injectImmediately: true
+        });
+        if (isNetflix(tab.url)) return;
+        await chrome.scripting.executeScript({
+          target: {tabId: tab.id, allFrames: true},
+          files: ['WindowScript.js'],
+          world: 'MAIN',
+          injectImmediately: true
+        });
+        send(tab.id, 'new');
+      } catch {}
     });
   }
 }

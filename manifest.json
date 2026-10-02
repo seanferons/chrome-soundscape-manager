@@ -27,7 +27,7 @@
       "description": "Make this window the soundscape"
     }
   },
-  "permissions": ["storage", "scripting"],
+  "permissions": ["storage", "scripting", "tabs", "webNavigation"],
   "background": {
     "service_worker": "background.js"
   },
