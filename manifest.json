@@ -41,6 +41,13 @@
     },
     {
       "matches": ["<all_urls>"],
+      "js": ["MediaKeyScript.js"],
+      "all_frames": true,
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["<all_urls>"],
       "exclude_matches": ["https://*.netflix.com/*"],
       "js": ["WindowScript.js"],
       "all_frames": true,

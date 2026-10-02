@@ -22,13 +22,13 @@ async function renderSoundscape() {
   if (windowId === null) {
     soundscapeEmpty.hidden = false;
     soundscapeEmpty.textContent =
-      'Nothing here yet. Press Option+S to make the current window the soundscape. Media already playing in that window, and media that starts there later, is part of it. Option+S in another window pauses the previous one and moves the soundscape. Option+P pauses or resumes it.';
+      'Nothing here yet. Press Option+S to make the current window the soundscape. Media already playing in that window, and media that starts there later, is part of it. Option+S in another window pauses the previous one and moves the soundscape. Option+P, or the keyboard media key, pauses or resumes the whole soundscape.';
     return;
   }
   soundscapeEmpty.hidden = false;
   soundscapeEmpty.textContent = ids.length
-    ? 'This window is the soundscape. Option+S in another window pauses it and moves the soundscape. Option+P pauses or resumes it.'
-    : 'This window is the soundscape. Media that plays here will join it. Option+S in another window pauses it and moves the soundscape. Option+P pauses or resumes it.';
+    ? 'This window is the soundscape. Option+S in another window pauses it and moves the soundscape. Option+P, or the keyboard media key, pauses or resumes the whole soundscape.'
+    : 'This window is the soundscape. Media that plays here will join it. Option+S in another window pauses it and moves the soundscape. Option+P, or the keyboard media key, pauses or resumes the whole soundscape.';
   for (const id of ids) {
     let label = 'Tab ' + id;
     try {

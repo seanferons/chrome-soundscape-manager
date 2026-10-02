@@ -24,6 +24,7 @@ async function save() {
     temp[value] = [...temp[value]];
   }
   await chrome.storage.session.set({state: temp});
+  announceMembership(false);
 }
 
 // The main-world hook breaks Netflix playback.
@@ -56,6 +57,7 @@ async function restore() {
     }
   }
   applyDefaultShortcuts();
+  announceMembership(true);
   resolveInitialization();
 }
 
@@ -93,7 +95,19 @@ chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
 
-chrome.runtime.onMessage.addListener(async (message, sender) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'soundscape-query') {
+    initializationCompletePromise.then(() => {
+      sendResponse({
+        member: Boolean(sender.tab && state.soundscape.has(sender.tab.id))
+      });
+    });
+    return true;
+  }
+  onRuntimeMessage(message, sender);
+});
+
+async function onRuntimeMessage(message, sender) {
   await initializationCompletePromise;
   // Security: Messages are from untrusted website content scripts.
   if (!hasProperty(sender, 'tab')) return;
@@ -105,8 +119,13 @@ chrome.runtime.onMessage.addListener(async (message, sender) => {
       if (await isPlaying(sender.tab.id)) break;
       onPause(sender.tab.id);
       break;
+    case 'media-key':
+      if (!state.soundscape.has(sender.tab.id)) break;
+      await onSoundscapeMediaKey(message.action);
+      save();
+      break;
   }
-});
+}
 
 chrome.tabs.onReplaced.addListener(async (newId, oldId) => {
   await initializationCompletePromise;
@@ -196,24 +215,57 @@ chrome.commands.onCommand.addListener(async (command) => {
   save();
 });
 
+function pauseSoundscape() {
+  // A manual pause replaces any outside media that was holding the soundscape.
+  state.soundscapePausedBy = null;
+  for (const id of state.soundscape) shortcutPausedTabs.add(id);
+  for (const id of state.soundscape) pause(id);
+}
+
+function playSoundscape() {
+  state.soundscapePausedBy = null;
+  shortcutPausedTabs.clear();
+  for (const id of state.soundscape) play(id);
+}
+
 async function toggleSoundscape() {
   if (state.soundscapeWindow === null) return;
-  let anythingPlaying = false;
+  if (await soundscapeIsPlaying()) pauseSoundscape();
+  else playSoundscape();
+}
+
+let lastMediaKeyAt = 0;
+
+async function onSoundscapeMediaKey(action) {
+  const now = Date.now();
+  if (now - lastMediaKeyAt < 400) return;
+  lastMediaKeyAt = now;
+  if (state.soundscapeWindow === null) return;
+  if (action === 'play') playSoundscape();
+  else if (action === 'pause') pauseSoundscape();
+  else await toggleSoundscape();
+}
+
+var announcedMembers = new Set();
+
+function announceMembership(forceAll) {
+  if (forceAll) {
+    chrome.tabs.query({}).then((tabs) => {
+      for (const tab of tabs) {
+        if (!tab.id) continue;
+        send(tab.id, 'soundscape-member', state.soundscape.has(tab.id));
+      }
+    });
+    announcedMembers = new Set(state.soundscape);
+    return;
+  }
+  for (const id of announcedMembers) {
+    if (!state.soundscape.has(id)) send(id, 'soundscape-member', false);
+  }
   for (const id of state.soundscape) {
-    if (await isAdvancing(id)) {
-      anythingPlaying = true;
-      break;
-    }
+    if (!announcedMembers.has(id)) send(id, 'soundscape-member', true);
   }
-  // A manual pause or resume replaces any outside media that was holding it.
-  state.soundscapePausedBy = null;
-  if (anythingPlaying) {
-    for (const id of state.soundscape) shortcutPausedTabs.add(id);
-    for (const id of state.soundscape) pause(id);
-  } else {
-    shortcutPausedTabs.clear();
-    for (const id of state.soundscape) play(id);
-  }
+  announcedMembers = new Set(state.soundscape);
 }
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
@@ -325,9 +377,11 @@ function resumeSoundscape() {
   for (const id of state.soundscape) play(id);
 }
 
-async function send(id, message) {
+async function send(id, message, body) {
+  const payload = {type: message};
+  if (body !== undefined) payload.body = body;
   try {
-    return await chrome.tabs.sendMessage(id, {type: message});
+    return await chrome.tabs.sendMessage(id, payload);
   } catch {}
 }
 
@@ -361,6 +415,12 @@ async function updateExtensionScripts() {
   for (const tab of tabs) {
     if (!tab.url || !tab.id) continue;
     chrome.tabs.sendMessage(tab.id, {type: 'hi ya!'}).catch(async () => {
+      await chrome.scripting.executeScript({
+        target: {tabId: tab.id, allFrames: true},
+        files: ['MediaKeyScript.js'],
+        world: 'MAIN',
+        injectImmediately: true
+      });
       await chrome.scripting.executeScript({
         target: {tabId: tab.id, allFrames: true},
         files: ['ContentScript.js'],

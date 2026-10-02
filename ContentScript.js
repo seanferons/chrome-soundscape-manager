@@ -5,8 +5,8 @@ var Targets = new Set();
 
 var Elements = new Map();
 
-// True while pauseElement is applying playbackRate/volume, so the hold
-// listeners do not treat that change as the page undoing a pause.
+// True while pauseElement is calling pause(), so a play event from that call
+// is not treated as the page starting media.
 var holdingPause = false;
 
 if (window.documentPictureInPicture)
@@ -51,7 +51,85 @@ function onExtensionMessage(message, sendResponse) {
       checkShadow();
       checkDOM();
       break;
+    case 'soundscape-member':
+      setSoundscapeMember(Boolean(message.body));
+      break;
   }
+}
+
+let soundscapeMember = false;
+let lastMediaKeyAt = 0;
+
+function publishSoundscapeMember(playing) {
+  window.postMessage(
+    {
+      source: 'csm-soundscape-member',
+      member: soundscapeMember,
+      playing: playing === undefined ? isAdvancing() : playing
+    },
+    '*'
+  );
+}
+
+function setSoundscapeMember(member) {
+  soundscapeMember = member;
+  const root = document.documentElement;
+  if (root) {
+    if (member) root.dataset.csmSoundscape = '1';
+    else delete root.dataset.csmSoundscape;
+  }
+  // The page-world script takes the hardware media key for this tab.
+  publishSoundscapeMember();
+  syncPlaybackState();
+}
+
+function onMediaKey(action) {
+  if (!soundscapeMember) return;
+  const now = Date.now();
+  if (now - lastMediaKeyAt < 400) return;
+  lastMediaKeyAt = now;
+  send('media-key', action);
+}
+
+function onMediaKeyDown(event) {
+  if (!soundscapeMember) return;
+  const key = event.key || event.code;
+  let action = '';
+  if (key === 'MediaPlay') action = 'play';
+  else if (key === 'MediaPause') action = 'pause';
+  else if (key === 'MediaPlayPause') action = 'playpause';
+  else return;
+  event.preventDefault();
+  event.stopImmediatePropagation();
+  onMediaKey(action);
+}
+
+window.addEventListener('keydown', onMediaKeyDown, true);
+window.addEventListener('message', (event) => {
+  if (event.source !== window || !event.data) return;
+  if (event.data.source !== 'csm-media-key') return;
+  onMediaKey(event.data.action);
+});
+
+try {
+  chrome.runtime.sendMessage({type: 'soundscape-query'}, (response) => {
+    if (chrome.runtime.lastError) return;
+    if (response && response.member) setSoundscapeMember(true);
+  });
+} catch {}
+
+function syncPlaybackState(playing) {
+  if (!navigator.mediaSession) return;
+  try {
+    navigator.mediaSession.playbackState =
+      playing === undefined
+        ? isAdvancing()
+          ? 'playing'
+          : 'paused'
+        : playing
+          ? 'playing'
+          : 'paused';
+  } catch {}
 }
 
 function isPlaying() {
@@ -80,6 +158,7 @@ function isPaused(e) {
 function onPlay(e, volumeChange) {
   if (!Elements.has(e) || isMuted(e)) return;
   send('play', volumeChange);
+  if (soundscapeMember) publishSoundscapeMember(true);
 }
 
 function validMedia(e) {
@@ -104,26 +183,26 @@ function addListener(src) {
   src.addEventListener(
     'play',
     function (event) {
-      if (validMedia(event.srcElement)) {
-        addMedia(event.srcElement);
-        onPlay(event.srcElement);
+      const media = event.srcElement;
+      if (!validMedia(media)) return;
+      const data = Elements.get(media);
+      // The page often calls play() as soon as it sees a pause. Keep the hold.
+      if (data && data.wasPlaying) {
+        event.stopImmediatePropagation();
+        if (!media.paused) pauseElement(media, data);
+        return;
       }
+      addMedia(media);
+      onPlay(media);
     },
     {
-      capture: true,
-      passive: true
+      capture: true
     }
   );
 }
 
 function isMuted(e) {
   if (e.muted) return true;
-  if (Elements.has(e)) {
-    let data = Elements.get(e);
-    if (data.wasPlaying) {
-      return data.wasVolume === 0;
-    }
-  }
   return e.volume === 0;
 }
 
@@ -138,17 +217,6 @@ function addMedia(src) {
     async (event) => {
       const media = event.srcElement;
       if (!validMedia(media)) return;
-      const data = Elements.get(media);
-      // Keep extension pauses silent when the page restores volume.
-      if (data && data.wasPlaying) {
-        if (!holdingPause && media.volume !== 0) {
-          holdingPause = true;
-          media.volume = 0;
-          holdingPause = false;
-        }
-        event.stopImmediatePropagation();
-        return;
-      }
       if (!isPaused(media)) {
         if (isMuted(media)) await sleep(200);
         onPlay(media, true);
@@ -186,20 +254,11 @@ function addMedia(src) {
     }
   );
 
-  // Dont tell the media please. stopImmediatePropagation is required because
-  // stopPropagation still lets other listeners on this element run, and pages
-  // use those to set playbackRate back to 1 while volume stays 0.
   src.addEventListener(
     'ratechange',
     function (event) {
       const media = event.srcElement;
       if (!validMedia(media)) return;
-      const data = Elements.get(media) || {};
-      if (data.wasPlaying) {
-        if (!holdingPause && media.playbackRate !== 0) holdPlayback(media);
-        event.stopImmediatePropagation();
-        return;
-      }
       if (!isPaused(media)) onPlay(media);
     },
     {
@@ -215,56 +274,27 @@ async function onPause(src, controller) {
   await sleep(200);
   if (validMedia(src) && src.paused) {
     const data = Elements.get(src);
-    // Real pause() fallback while an extension pause is in effect. Keep the
-    // element tracked so resume can call play() without a new user gesture path.
+    // Extension pause. Keep the element so resume can call play().
     if (data && data.wasPlaying) return;
     controller.abort();
-    normalPlayback(src);
     Elements.delete(src);
     // Check if all elements have paused.
     if (!isPlaying()) {
       send('pause');
+      if (soundscapeMember) publishSoundscapeMember(false);
     }
   }
 }
 
-function normalPlayback(src) {
-  let data = Elements.has(src) ? Elements.get(src) : {};
-  if (data.wasPlaying) {
-    const volume = data.wasVolume;
-    const rate = data.wasPlaybackRate;
-    // Clear the hold before restoring, or volume/rate listeners will reapply it.
-    data.wasPlaying = false;
-    src.volume = volume;
-    try {
-      src.playbackRate = rate;
-    } catch {}
-  }
-}
-
-function holdPlayback(e) {
-  holdingPause = true;
-  try {
-    e.playbackRate = 0;
-    if (e.playbackRate !== 0 && !e.paused) e.pause();
-  } catch {}
-  holdingPause = false;
-}
-
 function pauseElement(e, data) {
-  // If media attempts to play when it should be paused dont change its old values.
-  if (!data.wasPlaying) {
-    data.wasVolume = e.volume;
-    data.wasPlaybackRate = e.playbackRate;
-  }
-  // Rate change event will stopImmediatePropagation.
   data.wasPlaying = true;
   Elements.set(e, data);
+  if (holdingPause || e.paused) return;
   holdingPause = true;
   try {
-    e.playbackRate = 0;
-    e.volume = 0;
-    if (e.playbackRate !== 0 && !e.paused) e.pause();
+    e.pause();
+    // A pause handler on the page may have called play() before this returned.
+    if (!e.paused) e.pause();
   } catch {}
   holdingPause = false;
 }
@@ -280,18 +310,23 @@ function pause() {
       } catch {}
     });
   } catch {}
+  syncPlaybackState(false);
+  if (soundscapeMember) publishSoundscapeMember(false);
 }
 
 function resume() {
   Elements.forEach((data, e) => {
     if (!data.wasPlaying) return;
-    normalPlayback(e);
-    // playbackRate 0 cannot stick on some media, so pauseElement calls pause().
-    if (e.paused) {
+    // Clear the hold before play(), or the play listener will pause it again.
+    data.wasPlaying = false;
+    if (!e.paused) return;
+    try {
       const pending = e.play();
       if (pending) pending.catch(() => {});
-    }
+    } catch {}
   });
+  syncPlaybackState(true);
+  if (soundscapeMember) publishSoundscapeMember(true);
 }
 
 function checkShadow(DOM = document) {
@@ -338,10 +373,11 @@ function extensionAlive() {
   }
 }
 
-function send(message, volumeChange) {
+function send(message, extra) {
   if (!extensionAlive()) return;
   const msg = {type: message};
-  if (volumeChange) msg.volumeChange = true;
+  if (message === 'play' && extra) msg.volumeChange = true;
+  if (message === 'media-key' && extra) msg.action = extra;
   // sendMessage returns a promise in MV3. After a reload that promise rejects
   // with "Extension context invalidated" if nothing catches it.
   try {
